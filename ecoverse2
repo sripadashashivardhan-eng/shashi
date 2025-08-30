@@ -1,0 +1,754 @@
+import streamlit as st
+import os
+import tempfile
+import time
+from datetime import datetime
+import json
+import requests
+import zipfile
+import io
+from ibm_watson import TextToSpeechV1
+from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Page configuration
+st.set_page_config(
+    page_title="Echoverse - IBM Watson TTS",
+    page_icon="🎧",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(90deg, #0066cc 0%, #003366 100%);
+        padding: 2rem;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .voice-card {
+        background: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .voice-card:hover {
+        box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        transform: translateY(-2px);
+        transition: all 0.3s ease;
+    }
+    .stButton > button {
+        background: linear-gradient(90deg, #0066cc 0%, #003366 100%);
+        color: white;
+        border: none;
+        border-radius: 25px;
+        padding: 0.5rem 2rem;
+        font-weight: bold;
+    }
+    .stButton > button:hover {
+        background: linear-gradient(90deg, #003366 0%, #0066cc 100%);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .sidebar .sidebar-content {
+        background: #f8f9fa;
+    }
+    .watson-info {
+        background: #e6f3ff;
+        border: 1px solid #0066cc;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    .download-section {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 10px;
+        padding: 1.5rem;
+        margin: 1rem 0;
+    }
+    .download-button {
+        background: linear-gradient(90deg, #28a745 0%, #20c997 100%);
+        color: white;
+        border: none;
+        border-radius: 20px;
+        padding: 0.5rem 1.5rem;
+        font-weight: bold;
+        margin: 0.5rem;
+    }
+    .download-button:hover {
+        background: linear-gradient(90deg, #20c997 0%, #28a745 100%);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
+    .env-info {
+        background: #d4edda;
+        border: 1px solid #c3e6cb;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+class IBMWatsonTTS:
+    def _init_(self, api_key=None, service_url=None):
+        self.api_key = api_key
+        self.service_url = service_url
+        self.tts_service = None
+        
+        # IBM Watson TTS Voices
+        self.voices = {
+            "en-US": {
+                "Allison": "en-US_AllisonV3Voice",
+                "Lisa": "en-US_LisaV3Voice", 
+                "Michael": "en-US_MichaelV3Voice",
+                "Emma": "en-US_EmmaExpressive",
+                "Henry": "en-US_HenryV3Voice"
+            },
+            "en-GB": {
+                "Charlotte": "en-GB_CharlotteV3Voice",
+                "James": "en-GB_JamesV3Voice",
+                "Kate": "en-GB_KateV3Voice"
+            },
+            "de-DE": {
+                "Dieter": "de-DE_DieterV3Voice",
+                "Erika": "de-DE_ErikaV3Voice"
+            },
+            "es-ES": {
+                "Enrique": "es-ES_EnriqueV3Voice",
+                "Laura": "es-ES_LauraV3Voice"
+            },
+            "fr-FR": {
+                "Renee": "fr-FR_ReneeV3Voice"
+            },
+            "it-IT": {
+                "Francesca": "it-IT_FrancescaV3Voice"
+            },
+            "ja-JP": {
+                "Emi": "ja-JP_EmiV3Voice"
+            },
+            "pt-BR": {
+                "Isabela": "pt-BR_IsabelaV3Voice"
+            }
+        }
+        
+        if api_key and service_url:
+            self.initialize_service()
+    
+    def initialize_service(self):
+        """Initialize IBM Watson TTS service"""
+        try:
+            authenticator = IAMAuthenticator(self.api_key)
+            self.tts_service = TextToSpeechV1(authenticator=authenticator)
+            self.tts_service.set_service_url(self.service_url)
+            return True
+        except Exception as e:
+            st.error(f"Failed to initialize IBM Watson TTS: {e}")
+            return False
+    
+    def text_to_speech(self, text, voice_id, output_format="mp3", tone_settings=None):
+        """Convert text to speech using IBM Watson TTS with tone customization"""
+        if not self.tts_service:
+            return None, "IBM Watson TTS service not initialized"
+        
+        try:
+            # Create temporary file
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f".{output_format}")
+            temp_file.close()
+            
+            # Prepare synthesis parameters
+            synthesis_input = {
+                'text': text
+            }
+            
+            # Apply tone settings if provided
+            if tone_settings:
+                voice_settings = {}
+                
+                # Rate (speed) - range: 0.25 to 4.0
+                if 'rate' in tone_settings:
+                    voice_settings['rate'] = tone_settings['rate']
+                
+                # Pitch - range: -20 to 20
+                if 'pitch' in tone_settings:
+                    voice_settings['pitch'] = tone_settings['pitch']
+                
+                # Volume - range: 0 to 1
+                if 'volume' in tone_settings:
+                    voice_settings['volume'] = tone_settings['volume']
+                
+                # Add voice settings if any are specified
+                if voice_settings:
+                    synthesis_input['voice'] = voice_id
+                    synthesis_input['customization_id'] = None  # No custom voice model
+                    
+                    # Synthesize with custom settings
+                    response = self.tts_service.synthesize(
+                        **synthesis_input,
+                        accept=f"audio/{output_format}"
+                    ).get_result()
+                else:
+                    # Synthesize without custom settings
+                    response = self.tts_service.synthesize(
+                        text,
+                        voice=voice_id,
+                        accept=f"audio/{output_format}"
+                    ).get_result()
+            else:
+                # Synthesize without custom settings
+                response = self.tts_service.synthesize(
+                    text,
+                    voice=voice_id,
+                    accept=f"audio/{output_format}"
+                ).get_result()
+            
+            # Save audio to file
+            with open(temp_file.name, 'wb') as audio_file:
+                audio_file.write(response.content)
+            
+            return temp_file.name, None
+            
+        except Exception as e:
+            return None, str(e)
+    
+    def get_available_voices(self):
+        """Get list of available voices from IBM Watson"""
+        if not self.tts_service:
+            return {}
+        
+        try:
+            voices_response = self.tts_service.list_voices().get_result()
+            available_voices = {}
+            
+            for voice in voices_response['voices']:
+                language = voice['language']
+                name = voice['name']
+                voice_id = voice['voice_id']
+                
+                if language not in available_voices:
+                    available_voices[language] = {}
+                available_voices[language][name] = voice_id
+            
+            return available_voices
+        except Exception as e:
+            st.warning(f"Could not fetch available voices: {e}")
+            return self.voices  # Fallback to predefined voices
+
+def create_zip_file(audio_files, chunks, output_format):
+    """Create a zip file containing all audio chunks"""
+    try:
+        zip_buffer = io.BytesIO()
+        
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for i, audio_file in enumerate(audio_files):
+                chunk_num = i + 1
+                chunk_words = len(chunks[i].split())
+                
+                # Create descriptive filename
+                filename = f"chunk_{chunk_num:03d}_{chunk_words}_words.{output_format}"
+                
+                # Add file to zip
+                with open(audio_file, 'rb') as f:
+                    zip_file.writestr(filename, f.read())
+        
+        zip_buffer.seek(0)
+        return zip_buffer
+    except Exception as e:
+        st.error(f"Error creating zip file: {e}")
+        return None
+
+def check_env_credentials():
+    """Check if IBM Watson credentials are available in .env file"""
+    api_key = os.getenv('IBM_WATSON_API_KEY')
+    service_url = os.getenv('IBM_WATSON_SERVICE_URL')
+    
+    if api_key and service_url:
+        return api_key, service_url, True, []
+    else:
+        missing = []
+        if not api_key:
+            missing.append("IBM_WATSON_API_KEY")
+        if not service_url:
+            missing.append("IBM_WATSON_SERVICE_URL")
+        return None, None, False, missing
+
+def main():
+    # Header
+    st.markdown("""
+    <div class="main-header">
+        <h1>🎧 Echoverse - IBM Watson TTS</h1>
+        <p>Transform your text into captivating audiobooks with IBM Watson's premium voices</p>
+        <small>Powered by IBM Watson Text-to-Speech Technology</small>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Check environment credentials
+    api_key, service_url, credentials_ok, missing_vars = check_env_credentials()
+    
+    # Sidebar for IBM Watson configuration
+    with st.sidebar:
+        st.header("🔑 IBM Watson Setup")
+        
+        if credentials_ok:
+            st.success("✅ Credentials loaded from .env file")
+            st.info(f"*API Key: {api_key[:8]}...{api_key[-4:] if len(api_key) > 12 else '**'}")
+            st.info(f"*Service URL*: {service_url[:30]}...")
+            
+            # Test connection button
+            if st.button("🔗 Test Connection", use_container_width=True):
+                with st.spinner("Testing IBM Watson connection..."):
+                    tts_engine = IBMWatsonTTS(api_key, service_url)
+                    if tts_engine.tts_service:
+                        st.success("✅ Successfully connected to IBM Watson!")
+                        st.session_state['ibm_connected'] = True
+                    else:
+                        st.error("❌ Failed to connect to IBM Watson")
+                        st.session_state['ibm_connected'] = False
+        else:
+            st.error("❌ Missing environment variables")
+            st.warning(f"*Missing*: {', '.join(missing_vars)}")
+            
+            st.markdown("""
+            *📝 Create a .env file in your project root with:*
+            
+            IBM_WATSON_API_KEY=your_api_key_here
+            IBM_WATSON_SERVICE_URL=your_service_url_here
+            
+            """)
+            
+            st.markdown("""
+            *📚 How to get IBM Watson TTS:*
+            1. Go to [IBM Cloud](https://cloud.ibm.com/)
+            2. Create a Text-to-Speech service
+            3. Get your API Key and Service URL
+            4. Add them to your .env file
+            """)
+            
+            st.session_state['ibm_connected'] = False
+        
+        st.markdown("---")
+        
+        # Voice selection (only if connected)
+        if st.session_state.get('ibm_connected', False):
+            st.header("🎤 Voice Selection")
+            
+            # Language selection
+            language = st.selectbox(
+                "Language",
+                ["en-US", "en-GB", "de-DE", "es-ES", "fr-FR", "it-IT", "ja-JP", "pt-BR"]
+            )
+            
+            # Voice selection based on language
+            tts_engine = IBMWatsonTTS(api_key, service_url)
+            
+            voices = tts_engine.voices.get(language, {})
+            voice_name = st.selectbox("Voice", list(voices.keys()))
+            voice_id = voices[voice_name]
+            
+            # Audio settings
+            st.subheader("🎵 Audio Settings")
+            output_format = st.selectbox("Output Format", ["mp3", "wav", "flac"])
+            
+            # Voice tone customization
+            st.subheader("🎭 Voice Tone & Style")
+            
+            # Preset tone profiles
+            tone_presets = {
+                "Natural": {"rate": 1.0, "pitch": 0, "volume": 1.0},
+                "Slow & Clear": {"rate": 0.75, "pitch": 0, "volume": 1.0},
+                "Fast & Energetic": {"rate": 1.5, "pitch": 5, "volume": 1.0},
+                "Deep & Authoritative": {"rate": 0.9, "pitch": -8, "volume": 1.0},
+                "Warm & Friendly": {"rate": 1.0, "pitch": 3, "volume": 0.9},
+                "Professional": {"rate": 1.1, "pitch": 0, "volume": 1.0},
+                "Storytelling": {"rate": 0.85, "pitch": 2, "volume": 0.95},
+                "News Anchor": {"rate": 1.2, "pitch": -3, "volume": 1.0}
+            }
+            
+            selected_preset = st.selectbox(
+                "🎯 Tone Preset",
+                list(tone_presets.keys()),
+                help="Choose a preset tone profile for realistic voice characteristics"
+            )
+            
+            # Apply preset values
+            preset_values = tone_presets[selected_preset]
+            
+            # Rate control (speed)
+            rate = st.slider(
+                "Speaking Rate", 
+                min_value=0.25, 
+                max_value=4.0, 
+                value=preset_values["rate"], 
+                step=0.25,
+                help="0.25 = Very Slow, 1.0 = Normal, 4.0 = Very Fast"
+            )
+            
+            # Pitch control
+            pitch = st.slider(
+                "Pitch", 
+                min_value=-20, 
+                max_value=20, 
+                value=preset_values["pitch"], 
+                step=1,
+                help="-20 = Very Low, 0 = Normal, +20 = Very High"
+            )
+            
+            # Volume control
+            volume = st.slider(
+                "Volume", 
+                min_value=0.0, 
+                max_value=1.0, 
+                value=preset_values["volume"], 
+                step=0.1,
+                help="0.0 = Silent, 1.0 = Full Volume"
+            )
+            
+            # Store tone settings in session state
+            st.session_state['tone_settings'] = {
+                'rate': rate,
+                'pitch': pitch,
+                'volume': volume
+            }
+            
+            # Display current tone settings
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Rate", f"{rate}x")
+            with col2:
+                st.metric("Pitch", f"{pitch:+d}")
+            with col3:
+                st.metric("Volume", f"{volume:.1f}")
+            
+            # Additional voice enhancement options
+            st.subheader("🎨 Advanced Voice Features")
+            
+            # Emotion simulation through pitch variation
+            emotion_mode = st.checkbox(
+                "🎭 Enable Emotional Expression",
+                value=False,
+                help="Add subtle pitch variations to simulate natural speech patterns"
+            )
+            
+            if emotion_mode:
+                st.info("✨ Emotional mode will add natural pitch variations to make speech more engaging")
+                st.session_state['tone_settings']['emotion_mode'] = True
+            else:
+                st.session_state['tone_settings']['emotion_mode'] = False
+            
+            # Text processing
+            st.subheader("📝 Text Processing")
+            chunk_size = st.number_input("Chunk Size (words)", 50, 500, 100, help="Split long text into chunks")
+            pause_between_chunks = st.number_input("Pause between chunks (seconds)", 0.5, 3.0, 1.0, 0.1)
+            
+        else:
+            st.info("""
+            *🔑 To get started:*
+            1. Create a .env file with your IBM Watson credentials
+            2. Restart the application
+            3. Test your connection
+            """)
+    
+    # Main content area
+    if st.session_state.get('ibm_connected', False):
+        # Initialize TTS engine
+        tts_engine = IBMWatsonTTS(api_key, service_url)
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.subheader("📝 Input Text")
+            
+            # Text input options
+            input_method = st.radio(
+                "Choose input method:",
+                ["Type Text", "Upload File", "Sample Text"],
+                horizontal=True
+            )
+            
+            if input_method == "Type Text":
+                text_input = st.text_area(
+                    "Enter your text here:",
+                    height=300,
+                    placeholder="Type or paste your text here to convert it to speech using IBM Watson..."
+                )
+            elif input_method == "Upload File":
+                uploaded_file = st.file_uploader(
+                    "Upload a text file",
+                    type=['txt', 'md'],
+                    help="Upload a text file to convert to speech"
+                )
+                if uploaded_file is not None:
+                    try:
+                        text_input = uploaded_file.read().decode("utf-8")
+                        st.success(f"File uploaded successfully: {uploaded_file.name}")
+                    except Exception as e:
+                        st.error(f"Error reading file: {e}")
+                        text_input = ""
+                else:
+                    text_input = ""
+            else:  # Sample Text
+                sample_texts = {
+                    "The Great Gatsby": """In my younger and more vulnerable years my father gave me some advice that I've been turning over in my mind ever since. "Whenever you feel like criticizing any one," he told me, "just remember that all the people in this world haven't had the advantages that you've had." He didn't say any more, but we've always been unusually communicative in a reserved way, and I understood that he meant a great deal more than that.""",
+                    "Pride and Prejudice": """It is a truth universally acknowledged, that a single man in possession of a good fortune, must be in want of a wife. However little known the feelings or views of such a man may be on his first entering a neighbourhood, this truth is so well fixed in the minds of the surrounding families, that he is considered the rightful property of some one or other of their daughters.""",
+                    "1984": """It was a bright cold day in April, and the clocks were striking thirteen. Winston Smith, his chin nuzzled into his breast in an effort to escape the vile wind, slipped quickly through the glass doors of Victory Mansions, though not quickly enough to prevent a swirl of gritty dust from entering along with him.""",
+                    "The Hobbit": """In a hole in the ground there lived a hobbit. Not a nasty, dirty, wet hole, filled with the ends of worms and an oozy smell, nor yet a dry, bare, sandy hole with nothing in it to sit down on or to eat: it was a hobbit-hole, and that means comfort.""",
+                    "Alice in Wonderland": """Alice was beginning to get very tired of sitting by her sister on the bank, and of having nothing to do: once or twice she had peeped into the book her sister was reading, but it had no pictures or conversations in it, 'and what is the use of a book,' thought Alice 'without pictures or conversations?'"""
+                }
+                
+                selected_sample = st.selectbox("Choose sample text:", list(sample_texts.keys()))
+                text_input = sample_texts[selected_sample]
+                st.text_area("Sample Text:", text_input, height=200, disabled=True)
+            
+            # Text statistics
+            if text_input:
+                word_count = len(text_input.split())
+                char_count = len(text_input)
+                estimated_time = word_count / 150  # Assuming 150 words per minute
+                
+                st.info(f"📊 Text Statistics: {word_count} words, {char_count} characters, ~{estimated_time:.1f} minutes of audio")
+        
+        with col2:
+            st.subheader("🎵 Voice Preview")
+            
+            # Voice information card
+            tone_settings = st.session_state.get('tone_settings', {})
+            st.markdown(f"""
+            <div class="voice-card">
+                <h4>🎤 {voice_name}</h4>
+                <p><strong>Language:</strong> {language}</p>
+                <p><strong>Voice ID:</strong> {voice_id}</p>
+                <p><strong>Format:</strong> {output_format.upper()}</p>
+                <hr style="margin: 0.5rem 0;">
+                <p><strong>🎭 Tone Profile:</strong></p>
+                <p>• Rate: {tone_settings.get('rate', 1.0)}x</p>
+                <p>• Pitch: {tone_settings.get('pitch', 0):+d}</p>
+                <p>• Volume: {tone_settings.get('volume', 1.0):.1f}</p>
+                {f"• 🎭 Emotional Mode: ON" if tone_settings.get('emotion_mode', False) else ""}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Preview button
+            if st.button("🎧 Preview Voice", use_container_width=True):
+                if text_input:
+                    preview_text = text_input[:100] + "..." if len(text_input) > 100 else text_input
+                    
+                    with st.spinner("Generating preview with IBM Watson..."):
+                        # Get tone settings from session state
+                        tone_settings = st.session_state.get('tone_settings', {})
+                        audio_file, error = tts_engine.text_to_speech(
+                            preview_text, 
+                            voice_id, 
+                            output_format,
+                            tone_settings
+                        )
+                    
+                    if audio_file and not error:
+                        st.audio(audio_file, format=f'audio/{output_format}')
+                        st.success("Preview generated successfully!")
+                        
+                        # Clean up temporary file
+                        try:
+                            os.unlink(audio_file)
+                        except:
+                            pass
+                    else:
+                        st.error(f"Error generating preview: {error}")
+                else:
+                    st.warning("Please enter some text first!")
+        
+        # Generate audiobook chunks
+        if text_input and st.button("🚀 Generate Audiobook with IBM Watson", use_container_width=True, type="primary"):
+            st.subheader("🎬 Generating Audiobook with IBM Watson...")
+            
+            # Progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            try:
+                # Split text into chunks
+                words = text_input.split()
+                chunks = [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+                
+                audio_files = []
+                total_chunks = len(chunks)
+                
+                for i, chunk in enumerate(chunks):
+                    status_text.text(f"Processing chunk {i+1}/{total_chunks} with IBM Watson...")
+                    progress_bar.progress((i + 1) / total_chunks)
+                    
+                    # Generate audio for chunk with tone settings
+                    tone_settings = st.session_state.get('tone_settings', {})
+                    audio_file, error = tts_engine.text_to_speech(chunk, voice_id, output_format, tone_settings)
+                    
+                    if audio_file and not error:
+                        audio_files.append(audio_file)
+                    else:
+                        st.error(f"Error processing chunk {i+1}: {error}")
+                        break
+                    
+                    # Small delay between chunks
+                    time.sleep(pause_between_chunks)
+                
+                if audio_files:
+                    st.success(f"🎉 Successfully generated {len(audio_files)} audio chunks with IBM Watson!")
+                    
+                    # Store in session state for download
+                    st.session_state['audio_files'] = audio_files
+                    st.session_state['chunks'] = chunks
+                    st.session_state['output_format'] = output_format
+                    st.session_state['voice_name'] = voice_name
+                    st.session_state['word_count'] = word_count
+                    st.session_state['estimated_time'] = estimated_time
+                    
+                    # Display results
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("Chunks Generated", len(audio_files))
+                    
+                    with col2:
+                        st.metric("Total Words", word_count)
+                    
+                    with col3:
+                        st.metric("Estimated Time", f"{estimated_time:.1f} min")
+                    
+                    # Download Section
+                    st.markdown("""
+                    <div class="download-section">
+                        <h3>📥 Download Options</h3>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Download all as ZIP
+                    if st.button("📦 Download All Chunks as ZIP", use_container_width=True, type="secondary"):
+                        zip_buffer = create_zip_file(audio_files, chunks, output_format)
+                        if zip_buffer:
+                            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                            zip_filename = f"echoverse_ibm_{voice_name}_{timestamp}.zip"
+                            
+                            st.download_button(
+                                label="💾 Download ZIP File",
+                                data=zip_buffer.getvalue(),
+                                file_name=zip_filename,
+                                mime="application/zip",
+                                use_container_width=True
+                            )
+                    
+                    # Display each chunk with download option
+                    st.subheader("🎧 Your IBM Watson Audiobook Chunks")
+                    
+                    for i, audio_file in enumerate(audio_files):
+                        chunk_num = i + 1
+                        chunk_words = len(chunks[i].split())
+                        
+                        with st.expander(f"Chunk {chunk_num} ({chunk_words} words)", expanded=(i < 3)):
+                            st.audio(audio_file, format=f'audio/{output_format}')
+                            
+                            # Download button for individual chunk
+                            with open(audio_file, "rb") as file:
+                                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                                chunk_filename = f"echoverse_ibm_chunk_{chunk_num}_{timestamp}.{output_format}"
+                                
+                                st.download_button(
+                                    label=f"📥 Download Chunk {chunk_num}",
+                                    data=file.read(),
+                                    file_name=chunk_filename,
+                                    mime=f"audio/{output_format}",
+                                    use_container_width=True
+                                )
+                    
+                    # Instructions for combining
+                    st.info("""
+                    *💡 Tip*: To combine all chunks into one file:
+                    1. Download all chunks individually or as ZIP
+                    2. Use an audio editor like Audacity, GarageBand, or online tools
+                    3. Import all files and arrange them in sequence
+                    4. Export as a single audio file
+                    """)
+                    
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+            except Exception as e:
+                st.error(f"Error generating audiobook: {e}")
+                progress_bar.empty()
+                status_text.empty()
+    
+    else:
+        # Show setup instructions
+        st.markdown("""
+        <div class="watson-info">
+            <h3>🚀 Welcome to Echoverse with IBM Watson TTS!</h3>
+            <p>To get started, you'll need IBM Watson Text-to-Speech credentials in a .env file:</p>
+            <ol>
+                <li><strong>Create IBM Cloud Account:</strong> Visit <a href="https://cloud.ibm.com" target="_blank">cloud.ibm.com</a></li>
+                <li><strong>Create TTS Service:</strong> Search for "Text to Speech" and create a service</li>
+                <li><strong>Get Credentials:</strong> Copy your API Key and Service URL</li>
+                <li><strong>Create .env file:</strong> Add credentials to your project root</li>
+            </ol>
+            <p><strong>Free Tier:</strong> IBM Watson TTS offers 10,000 characters per month for free!</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Show .env file format
+        st.markdown("""
+        <div class="env-info">
+            <h4>📝 Create a .env file in your project root:</h4>
+            <pre style="background: #f8f9fa; padding: 1rem; border-radius: 5px;">
+IBM_WATSON_API_KEY=your_api_key_here
+IBM_WATSON_SERVICE_URL=your_service_url_here
+            </pre>
+            <p><strong>Note:</strong> After creating the .env file, restart the application for changes to take effect.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Show sample of what's possible
+        st.subheader("🎧 What You'll Be Able to Do:")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("""
+            *🎤 Premium Voices*
+            - Natural-sounding voices
+            - Multiple languages
+            - Professional quality
+            """)
+        
+        with col2:
+            st.markdown("""
+            *🎵 Audio Formats*
+            - MP3, WAV, FLAC
+            - High-quality output
+            - Consistent results
+            """)
+        
+        with col3:
+            st.markdown("""
+            *📚 Audiobook Creation*
+            - Long text processing
+            - Chunk-based generation
+            - Professional results
+            """)
+    
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style="text-align: center; color: #666; padding: 1rem;">
+        <p>🎧 Echoverse - Powered by IBM Watson Text-to-Speech</p>
+        <p>Enterprise-grade AI voices for professional audiobook creation</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+if __name__ == "__main__":
+    main()
